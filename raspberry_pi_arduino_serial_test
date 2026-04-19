@@ -1,0 +1,52 @@
+// 핀 설정
+#define LED_GENERAL 2
+#define LED_PLASTIC 3
+#define LED_GLASS   4
+#define LED_CAN     5
+
+String inputString = "";
+
+void setup() {
+  Serial.begin(9600);
+
+  pinMode(LED_GENERAL, OUTPUT);
+  pinMode(LED_PLASTIC, OUTPUT);
+  pinMode(LED_GLASS, OUTPUT);
+  pinMode(LED_CAN, OUTPUT);
+
+  allOff();
+}
+
+void loop() {
+  // 시리얼 데이터 읽기
+  if (Serial.available()) {
+    inputString = Serial.readStringUntil('\n');
+    inputString.trim();  // 공백 제거
+
+    Serial.print("받은 데이터: ");
+    Serial.println(inputString);
+
+    allOff();  // 먼저 전부 끔
+
+    if (inputString == "GENERAL") {
+      digitalWrite(LED_GENERAL, HIGH);
+    }
+    else if (inputString == "PLASTIC") {
+      digitalWrite(LED_PLASTIC, HIGH);
+    }
+    else if (inputString == "GLASS") {
+      digitalWrite(LED_GLASS, HIGH);
+    }
+    else if (inputString == "CAN") {
+      digitalWrite(LED_CAN, HIGH);
+    }
+  }
+}
+
+// 모든 LED 끄기
+void allOff() {
+  digitalWrite(LED_GENERAL, LOW);
+  digitalWrite(LED_PLASTIC, LOW);
+  digitalWrite(LED_GLASS, LOW);
+  digitalWrite(LED_CAN, LOW);
+}
