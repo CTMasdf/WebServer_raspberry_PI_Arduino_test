@@ -1,0 +1,401 @@
+#include <Servo.h>
+// ★ 이 줄이 꼭! 코드 윗부분(전역 변수 자리)에 있어야 합니다.
+byte registerState = 0;
+
+/********* 압력감지 센서 gpio *********/
+#define PUSH_SEN_1 A0
+#define PUSH_SEN_2 A1
+
+/********* X축 이동 감지 적외선 센서 gpio *********/
+#define X_MOVE_IR_1 A2
+#define X_MOVE_IR_2 A3
+//#define X_MOVE_IR_3 A4
+//#define X_MOVE_IR_4 A5
+
+/********* IC 4094 모터제어 gpio *********/
+#define MOTOR_SHIFT_DATA SCL
+#define MOTOR_SHIFT_CLK SDA
+#define MOTOR_SHIFT_STR 13
+
+/********* 서보모터 gpio *********/
+#define SERVO_MO_IN1 11
+#define SERVO_MO_IN2 10
+//#define SERVO_MO_IN3 9
+
+/********* 액추에이터 gpio ***********/
+#define MOTOR_ACT1_BIT 0 //시프트 레지스터 Q1(물리핀4)
+#define MOTOR_ACT2_BIT 1 //시프트 레지스터 Q2(물리핀5)
+
+/********* 금속센서 gpio *********/
+#define IRON_SEN1 8
+
+/********* 쓰레기 투입 감지 ir 센서 gpio *********/
+#define Trash_IR_IN 12
+
+
+/********* 초음파 센서 gpio *********/
+#define TRASH_CHO_1_TRIG 3
+#define TRASH_CHO_2_TRIG 2
+#define TRASH_CHO_3_TRIG 9 //(위치번경?)
+#define TRASH_CHO_4_TRIG 8 //(위치변경?) 
+
+#define TRASH_CHO_1_ECHO 7 
+#define TRASH_CHO_2_ECHO 6
+#define TRASH_CHO_3_ECHO 5
+#define TRASH_CHO_4_ECHO 4
+
+
+// 서보모터 객체 생성
+Servo myServo_1; //투입구 서보모터
+Servo myServo_2; //쓰레받이 서보모터 1
+Servo myServo_3; //쓰레받이 서보모터 1
+
+
+// 압력 센서값 변수
+int pressure_1_val, pressure_2_val;
+
+// 금속센서 값 변수
+int iron_val = 0;
+
+// 쓰레기 투입 ir 변수 
+int trash_ir_val;
+
+// X축 이동 감지 센서 변수 추가
+int trash_ir1_val; 
+int trash_ir2_val;
+int trash_ir3_val;
+int trash_ir4_val;
+
+// 시리얼에서 입력된 분류 명령어 저장
+String inputString = "";
+long duration_1, duration_2, duration_3, duration_4;
+long distance_1, distance_2,distance_3,distance_4;
+const int ledPins[] = {2, 3, 4, 5};  // 순서대로: 일반, 플라스틱, 유리, 캔
+  
+  
+  
+// 타이머 카운트 테스트 전역변수
+int time;
+
+/******* 압력 센서 *******/
+void buttonControl() {
+  // 1. 아날로그 값 읽기 (전역변수에 저장)
+  pressure_1_val = analogRead(PUSH_SEN_1);
+  pressure_2_val = analogRead(PUSH_SEN_2);
+
+  // 2. 아날로그 값을 전압(mV)으로 변환 (0~5000mV)
+  // map(값, 저점, 고점, 변환저점, 변환고점)
+  long pressure1_mv = map(pressure_1_val, 0, 1023, 0, 5000);
+  long pressure2_mv = map(pressure_2_val, 0, 1023, 0, 5000);
+
+  // 3. 간이 무게 변환 (테스트용 근사치 계산)
+  // 전압이 높을수록 센서를 누르는 힘이 강하다는 뜻입니다.
+  // 실제 센서의 데이터시트에 따라 보정이 필요할 수 있습니다.
+  long weight1 = 0;
+  long weight2 = 0;
+
+  if (pressure1_mv > 0) weight1 = pressure1_mv * 2; // 임의의 가중치 2를 곱해 g 단위 생성
+  if (pressure2_mv > 0) weight2 = pressure2_mv * 2;
+
+  // 4. 시리얼 모니터 출력
+  Serial.print(" | P1 무게: ");
+  Serial.print(weight1);
+  Serial.print(" g \n");
+  
+  Serial.print(" | P2 무게: ");
+  Serial.print(weight2);
+  Serial.println(" g");
+}
+
+/****** 모터, 엑추에이터 제어*******/
+/*ic4094 함수 선언 | ic4094 function declaration*/
+void ic4094(int data){
+   int i;                        //for문 변수 i생성 | for statement create variable i
+   for(i = 0; i < 8; i++){         //ic4094 핀이 8개 이기 때문에 0~7까지 반복 | There are 16 ic4094 pins, so repeat from 0 to 15.
+      if(data&(0x80 >> i)){         //입력된 data값과 0x8000이 i값 만큼 오른쪽으로 쉬프트 했을 때 1이 되면 | If the input data value and 0x8000 become 1 when moving to the right by the i value,
+      digitalWrite(MOTOR_SHIFT_DATA, HIGH);
+      }
+      else
+      digitalWrite(MOTOR_SHIFT_DATA, LOW);
+    digitalWrite(MOTOR_SHIFT_CLK, HIGH);
+    delay(1);
+      digitalWrite(MOTOR_SHIFT_CLK, LOW);
+    //CLK_OFF
+   }
+   digitalWrite(MOTOR_SHIFT_STR, HIGH);
+    delay(1);
+   digitalWrite(MOTOR_SHIFT_STR, LOW);
+    
+}
+
+// 시프트 레지스터 상태 업데이트 함수 (이게 꼭 있어야 합니다!)
+void updateShiftRegister() {
+  digitalWrite(MOTOR_SHIFT_STR, LOW);
+  shiftOut(MOTOR_SHIFT_DATA, MOTOR_SHIFT_CLK, MSBFIRST, registerState);
+  digitalWrite(MOTOR_SHIFT_STR, HIGH);
+}
+
+/******* 액추에이터 제어 함수 *******/
+void moveActuator() {
+  // 1. 전진 (나오기)
+  Serial.println("Actuator: FORWARD START");
+  bitSet(registerState, MOTOR_ACT1_BIT);   // Q1 = 1
+  bitClear(registerState, MOTOR_ACT2_BIT); // Q2 = 0
+  updateShiftRegister();
+  delay(3000); // 완전히 나올 때까지 대기
+
+  // 2. 중간 정지 (기계적 부하 방지)
+  bitClear(registerState, MOTOR_ACT1_BIT);
+  bitClear(registerState, MOTOR_ACT2_BIT);
+  updateShiftRegister();
+  Serial.println("Actuator: STOP");
+  delay(1000); 
+
+  // 3. 후진 (다시 들어가기)
+  Serial.println("Actuator: BACKWARD START");
+  bitClear(registerState, MOTOR_ACT1_BIT); // Q1 = 0
+  bitSet(registerState, MOTOR_ACT2_BIT);   // Q2 = 1 (이게 들어가는 신호입니다)
+  updateShiftRegister();
+  delay(3000); // 완전히 들어갈 때까지 대기
+
+  // 4. 최종 정지 (모터 보호)
+  bitClear(registerState, MOTOR_ACT1_BIT);
+  bitClear(registerState, MOTOR_ACT2_BIT);
+  updateShiftRegister();
+  Serial.println("Actuator: ALL STOP");
+  delay(1000);
+}
+
+/******* 쓰레기 투입 감지 ir 센서 *******/
+void Trash_IR(){
+  trash_ir_val = digitalRead(Trash_IR_IN);
+}
+/****** x축 이동 ir 센서******/
+void X_MOVE_IR(){
+  // 각각의 쓰레기통위치에 설치되어 있음.
+  trash_ir1_val = digitalRead(X_MOVE_IR_1);  
+  trash_ir2_val = digitalRead(X_MOVE_IR_2);
+  //trash_ir3_val = digitalRead(X_MOVE_IR_3);
+  //trash_ir4_val = digitalRead(X_MOVE_IR_4);
+}
+void X_MOVE_IR_serial(){
+  // 2. 시리얼 모니터 출력 (적외선 센서용)
+  Serial.print("IR 1번: ");
+  if(trash_ir1_val == LOW) Serial.print("감지됨");
+  else Serial.print("미감지");
+  
+  Serial.print(" | IR 2번: ");
+  if(trash_ir2_val == LOW) Serial.println("감지됨");
+  else Serial.println("미감지");
+}
+
+/******* 사용자가 넣는 투입구 서보모터 제어 ******/
+void servo_first(){
+  Serial.println("서보1 동작");
+
+  myServo_1.write(0);   // 닫힘
+  delay(500);
+
+  myServo_1.write(90);  // 열림
+  delay(500);
+}
+
+/******* 쓰레기 받이에 쓰레기 투입하는 서보모터 제어 ******/
+void servo_seconde(){
+  myServo_2.write(180);
+  myServo_3.write(180);
+}
+
+/******* 금속감지 센서 ******/
+void IRON_SEN(){
+  iron_val = digitalRead(IRON_SEN1);
+}
+
+/******* 일반쓰레기통 안에 쓰레기 용량 확인******/
+void CHO_SEN_1(){
+  digitalWrite(TRASH_CHO_1_TRIG, HIGH);
+  delayMicroseconds(10);
+  digitalWrite(TRASH_CHO_1_TRIG, LOW);
+  //초음파
+  duration_1 = pulseIn(TRASH_CHO_1_ECHO, HIGH);
+  distance_1 = duration_1 / 29 / 2;
+}
+void CHO_SEN_1_serial(){
+  Serial.print(" |1 Dist: ");
+  Serial.print(distance_1);
+  Serial.println(" cm");
+}
+/******* 플라스틱통 안에 쓰레기 용량 확인******/
+void CHO_SEN_2(){
+  digitalWrite(TRASH_CHO_2_TRIG, HIGH);
+  delayMicroseconds(10);
+  digitalWrite(TRASH_CHO_2_TRIG, LOW);
+  duration_2 = pulseIn(TRASH_CHO_2_ECHO, HIGH);
+  distance_2 = duration_2 / 29 / 2;
+}
+void CHO_SEN_2_serial(){
+  Serial.print(" |2 Dist: ");
+  Serial.print(distance_2);
+  Serial.println(" cm");
+}
+
+/******* 유리통 안에 쓰레기 용량 확인******/
+void CHO_SEN_3(){
+  digitalWrite(TRASH_CHO_3_TRIG, HIGH);
+  delayMicroseconds(10);
+  digitalWrite(TRASH_CHO_3_TRIG, LOW);
+  duration_3= pulseIn(TRASH_CHO_3_ECHO, HIGH);
+  distance_3 = duration_3 / 29 / 2;
+}
+void CHO_SEN_3_serial(){
+  Serial.print(" |3 Dist: ");
+  Serial.print(distance_3);
+  Serial.println(" cm");
+}
+
+/******* 캔통 안에 쓰레기 용량 확인******/
+void CHO_SEN_4(){
+  digitalWrite(TRASH_CHO_4_TRIG, HIGH);
+  delayMicroseconds(10);
+  digitalWrite(TRASH_CHO_4_TRIG, LOW);
+  duration_4 = pulseIn(TRASH_CHO_4_ECHO, HIGH);
+  distance_4 = duration_4 / 29 / 2;
+}
+void CHO_SEN_4_serial(){
+  Serial.print(" |4 Dist: ");
+  Serial.print(distance_4);
+  Serial.println(" cm");
+}
+
+void Serialled(){
+  if (Serial.available()) {
+    inputString = Serial.readStringUntil('\n');
+    inputString.trim();  // 공백 제거
+
+    // 모든 LED 끄기
+    for (int i = 0; i < 4; i++) {
+      digitalWrite(ledPins[i], LOW);
+    }
+
+    // 조건에 따라 하나만 켜기
+    if (inputString == "GENERAL") {
+      digitalWrite(ledPins[0], HIGH);
+    }
+    else if (inputString == "PLASTIC") {
+      digitalWrite(ledPins[1], HIGH);
+    }
+    else if (inputString == "GLASS") {
+      digitalWrite(ledPins[2], HIGH);
+    }
+    else if (inputString == "CAN") {
+      digitalWrite(ledPins[3], HIGH);
+    }
+  }
+}
+
+ISR(TIMER2_OVF_vect) {
+  // 1ms 주기를 위한 타이머 초깃값 설정
+  // 계산식: 256 - (16MHz / 64 / 1000Hz) = 256 - 250 = 6
+  // 또는 분주비에 따라 131 등을 사용 (하단 설명 참조)
+  TCNT2 = 6; // 10us
+  time++;
+  // 1ms씩 증가하므로 1000번 카운트하면 1초입니다.
+  if (time >= 3000) {
+    
+    time = 0;
+  }
+  
+}
+
+void setup() {
+
+  // 초기 설정
+  // PUSH 센서
+  pinMode(PUSH_SEN_1, INPUT);
+  pinMode(PUSH_SEN_2, INPUT);
+
+  // X 이동 IR 센서
+  pinMode(X_MOVE_IR_1, INPUT);
+  pinMode(X_MOVE_IR_2, INPUT);
+  //pinMode(X_MOVE_IR_3, INPUT);
+ // pinMode(X_MOVE_IR_4, INPUT);
+
+  // 모터 쉬프트 레지스터(출력 모드로 설정)
+  pinMode(MOTOR_SHIFT_DATA, OUTPUT);
+  pinMode(MOTOR_SHIFT_CLK, OUTPUT);
+  pinMode(MOTOR_SHIFT_STR, OUTPUT);
+
+  // 서보 모터 핀
+  pinMode(SERVO_MO_IN1, OUTPUT);
+  pinMode(SERVO_MO_IN2, OUTPUT);
+  //pinMode(SERVO_MO_IN3, OUTPUT);
+
+  // 기타 센서
+  pinMode(IRON_SEN1, INPUT);
+  pinMode(Trash_IR_IN, INPUT);
+
+  // 초음파 센서 TRIG
+  pinMode(TRASH_CHO_1_TRIG, OUTPUT);
+  pinMode(TRASH_CHO_2_TRIG, OUTPUT);
+  pinMode(TRASH_CHO_3_TRIG, OUTPUT);
+  pinMode(TRASH_CHO_4_TRIG, OUTPUT);
+
+  // 초음파 센서 ECHO
+  pinMode(TRASH_CHO_1_ECHO, INPUT);
+  pinMode(TRASH_CHO_2_ECHO, INPUT);
+  pinMode(TRASH_CHO_3_ECHO, INPUT);
+  pinMode(TRASH_CHO_4_ECHO, INPUT);
+
+
+  // 투입구서보모터 초기 각도 설정 및 시작
+  myServo_1.attach(SERVO_MO_IN1); 
+  myServo_1.write(0);         
+
+  // 쓰레받이 서보모터 초기 각도 설정 및 시작
+  myServo_2.attach(SERVO_MO_IN2); 
+  myServo_2.write(0);         
+
+  // 쓰레받이 서보모터 초기 각도 설정 및 시작
+//  myServo_3.attach(SERVO_MO_IN3); 
+//  myServo_3.write(0);         
+
+  // 시리얼 통신
+  Serial.begin(9600);
+
+   // Timer2 설정 (1ms 주기, 프리스케일러 128)
+  TCCR2A = 0x00;
+  TCCR2B = 0x05;    // 프리스케일러 128
+  TCNT2 = 0xE7;     // 1ms 정도 간격으로 인터럽트 발생
+  TIMSK2 = 0x01;    // 오버플로우 인터럽트 허용
+  sei();            // 전역 인터럽트 허용 
+
+  // 3. 아두이노가 켜질 때 액추에이터가 제멋대로 움직이는 것을 막기 위해 '모두 정지(0)' 상태로 초기화합니다.
+  registerState = 0; 
+  updateShiftRegister(); // 이 함수를 호출해야 4094 칩으로 0(정지) 신호가 확정되어 들어갑니다.
+  
+}
+
+void loop() {
+  // 여기에 센서 입력값 받아오기.
+  buttonControl();  // 압력센서 함수
+  Trash_IR();       // 쓰레기 투입 감지 적외선 센서
+  X_MOVE_IR();      // X축 이동 감지 ir 센서
+  IRON_SEN();       // 금속 감지 센서
+  CHO_SEN_1();      // 일반쓰레기 용량 감지 초음파 센서
+  CHO_SEN_2();      // 플라스틱 쓰레기 용량 감지 초음파 센서
+  CHO_SEN_3();      // 캔 쓰레기 용량 감지 초음파 센서
+  CHO_SEN_4();      // 유리 쓰레기 용량 감지 초음파 센서
+  //Serialled();       // 시리얼 값에 따라 led핀을 출력
+  
+  // 쓰레기가 감지되었을 때(예: LOW 신호)만 액추에이터 작동
+  if (trash_ir_val == LOW) { 
+    //moveActuator(); // 액추에이터 작동
+    servo_first(); // 쓰레기 들어오면 문 열기
+  servo_seconde(); // 쓰레받이 작동
+  }
+    X_MOVE_IR_serial();
+  CHO_SEN_1_serial();
+    CHO_SEN_2_serial();
+    CHO_SEN_3_serial();
+    CHO_SEN_4_serial();
+}
